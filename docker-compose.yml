@@ -1,0 +1,294 @@
+version: "3.3"
+
+networks:
+  netw:
+    driver: bridge
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:5.1.0
+    hostname: zookeeper
+    container_name: zookeeper-iot
+    ports:
+      - 2181:2181
+    networks:
+      - netw
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:5.1.0
+    ports:
+      - 9092:9092
+      - 29092:29092
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.request.logger=WARN"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_MAX_REQUEST_SIZE: 500000000          
+      KAFKA_MESSAGE_MAX_BYTES: 500000000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    hostname: kafka
+    container_name: kafka-iot
+    networks:
+      - netw
+    restart: always
+
+  cassandra:
+    image: 'cassandra:4.1'
+    hostname: cassandra
+    networks:
+      - netw
+    ports:
+      - "9042:9042"
+    environment:
+      - "MAX_HEAP_SIZE=256M"
+      - "HEAP_NEWSIZE=128M"
+    container_name: cassandra-iot
+    volumes:
+      - ./data/schema.cql:/schema.cql
+
+  spark-master:
+    image: bde2020/spark-master:3.0.0-hadoop3.2-java11
+    container_name: spark-master
+    hostname: spark-master
+    healthcheck:
+      interval: 5s
+      retries: 100
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    environment:
+      - INIT_DAEMON_STEP=false
+      - SPARK_DRIVER_HOST=spark-master
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    volumes:
+      - ./:/app
+      - ./data:/data
+    networks:
+      - netw
+    depends_on:
+      - namenode
+
+  spark-worker-1:
+    image: bde2020/spark-worker:3.0.0-hadoop3.2-java11
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - "SPARK_MASTER=spark://spark-master:7077"
+    volumes:
+      - ./data/spark/:/opt/spark-data
+    networks:
+      - netw
+  spark-worker-2:
+    image: bde2020/spark-worker:3.0.0-hadoop3.2-java11
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    depends_on:
+      - spark-master
+    ports:
+      - "8082:8081"
+    environment:
+      - "SPARK_MASTER=spark://spark-master:7077"
+    volumes:
+      - ./data/spark/:/opt/spark-data
+    networks:
+      - netw
+
+  spark-worker-3:
+    image: bde2020/spark-worker:3.0.0-hadoop3.2-java11
+    container_name: spark-worker-3
+    hostname: spark-worker-3
+    depends_on:
+      - spark-master
+    ports:
+      - "8083:8081"
+    environment:
+      - "SPARK_MASTER=spark://spark-master:7077"
+    volumes:
+      - ./data/spark/:/opt/spark-data
+    networks:
+      - netw
+
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.1.3-java8
+    container_name: namenode
+    hostname: namenode
+    volumes:
+      - ./data/namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=test
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    healthcheck:
+      interval: 5s
+      retries: 100
+    networks:
+      - netw
+    ports:
+      - 9870:9870
+      - 8020:8020
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.1.3-java8
+    container_name: datanode
+    hostname: datanode
+    volumes:
+      - ./data/datanode:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+    depends_on:
+      - namenode
+    healthcheck:
+      interval: 5s
+      retries: 100
+    networks:
+      - netw
+    ports:
+      - 9864:9864
+      - 9866:9866
+      - 9867:9867
+
+  hive-metastore-postgresql:
+    image: bde2020/hive-metastore-postgresql:2.3.0
+    container_name: hive-metastore-postgresql
+    hostname: hive-metastore-postgresql
+    volumes:
+      - ./datahive:/var/lib/postgresql/data
+    networks:
+      - netw
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    hostname: hive-metastore
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870 datanode:9864 hive-metastore-postgresql:5432
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionURL=jdbc:postgresql://hive-metastore-postgresql:5432/metastore
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionDriverName=org.postgresql.Driver
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionUserName=hive
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionPassword=hive
+    depends_on:
+      - hive-metastore-postgresql
+      - namenode
+      - datanode
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./hive-site.xml:/etc/hadoop/hive-site.xml
+    ports:
+      - "9083:9083"
+    networks:
+      - netw
+
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-server
+    hostname: hive-server
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionURL=jdbc:postgresql://hive-metastore-postgresql:5432/metastore
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionDriverName=org.postgresql.Driver
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionUserName=hive
+      - HIVE_CORE_CONF_javax_jdo_option_ConnectionPassword=hive
+      - SERVICE_PRECONDITION=hive-metastore:9083
+    depends_on:
+      - hive-metastore
+    volumes:
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./hive-site.xml:/etc/hadoop/hive-site.xml
+      - ./create_hive_tables.sql:/opt/hive/create_hive_tables.sql
+    command: >
+      bash -lc "/opt/hive/bin/hiveserver2 & sleep 20; /opt/hive/bin/beeline -u jdbc:hive2://hive-server:10000 -n hive -f /opt/hive/create_hive_tables.sql || true; wait"
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    networks:
+      - netw
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: producer-amazon
+    networks:
+      - netw
+    volumes:
+      - ./:/app
+      - ./data:/data
+    working_dir: /app
+    command: python kafka_producer_amazon.py
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=supermarket-sales
+
+  spark-streaming:
+    image: bde2020/spark-master:3.0.0-hadoop3.2-java11
+    container_name: spark-streaming-consumer
+    hostname: spark-streaming
+    networks:
+      - netw
+    volumes:
+      - ./:/app
+      - ./data:/data
+    working_dir: /app
+    command: >
+      bash -c "sleep 30 && /spark/bin/spark-submit 
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.0 
+      --master spark://spark-master:7077 
+      --deploy-mode client 
+      spark_kafka_hdfs_consumer.py"
+    depends_on:
+      - kafka
+      - spark-master
+      - namenode
+      - datanode
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=supermarket-sales
+      - HDFS_URL=hdfs://namenode:8020
+
+  streamlit-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streamlit-dashboard
+    hostname: streamlit
+    networks:
+      - netw
+    volumes:
+      - ./:/app
+      - ./data:/data
+    working_dir: /app
+    command: >
+      bash -c "pip install streamlit plotly pyhive sasl thrift thrift-sasl && 
+      streamlit run streamlit_dashboard.py --server.port=8501 --server.address=0.0.0.0"
+    depends_on:
+      - hive-server
+      - namenode
+      - datanode
+    ports:
+      - "8501:8501"
+    environment:
+      - HDFS_URL=hdfs://namenode:8020
+      - HIVE_SERVER=hive-server
+      - HIVE_PORT=10000
+
+volumes:
+  namenode:
