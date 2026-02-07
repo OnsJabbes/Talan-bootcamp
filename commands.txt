@@ -1,0 +1,58 @@
+docker compose down -v --remove-orphans
+docker system prune -f
+
+
+
+docker compose build --no-cache
+
+docker compose up -d
+
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+
+docker exec -it namenode bash -lc '
+H=/opt/hadoop-3.1.3/bin/hdfs
+$H dfs -mkdir -p \
+  /tmp \
+  /user/hive/warehouse \
+  /datalake/bronze/amazon_sales \
+  /datalake/silver/amazon_sales \
+  /datalake/gold/amazon_sales_aggregated \
+  /checkpoints/bronze \
+  /checkpoints/silver \
+  /checkpoints/gold_parquet \
+  /checkpoints/oltp_orders_pg \
+  /checkpoints/olap_kpi_1min_pg
+$H dfs -chmod -R 777 /tmp /user/hive/warehouse /datalake /checkpoints
+$H dfs -ls /datalake
+'
+
+
+docker compose restart spark-streaming
+
+
+docker logs -f spark-streaming
+
+docker logs -f producer-amazon
+
+
+docker compose restart producer
+
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic amazon-sales --from-beginning --max-messages 3
+
+
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/bronze/amazon_sales | tail"
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/silver/amazon_sales | tail"
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_aggregated | tail"
+
+docker exec -it postgres-mart psql -U mart -d martdb -c "select count(*) from orders_live;"
+
+docker exec -it postgres-mart psql -U mart -d martdb -c "select count(*) from kpi_1min;"
+
+docker exec -it postgres-mart psql -U mart -d martdb -c "select count(*) from kpi_daily;"
+
+docker logs -f streamlit-oltp
+
+docker logs spark-streaming --tail 200
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /checkpoints | head -n 50"
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_aggregated | tail"
