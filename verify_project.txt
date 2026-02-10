@@ -1,0 +1,211 @@
+# ========================================
+# AIRFLOW PROJECT VERIFICATION GUIDE
+# ========================================
+
+# STEP 1: Check Airflow Services are Running
+# -------------------------------------------
+docker ps --format "table {{.Names}}\t{{.Status}}" | findstr airflow
+
+# Expected output:
+# - airflow-webserver (should be Up)
+# - airflow-scheduler (should be Up)
+# - airflow-db (should be Up)
+
+
+# STEP 2: Access Airflow Web UI
+# -------------------------------------------
+echo Opening Airflow UI at http://localhost:8088
+echo Username: admin
+echo Password: admin
+
+# Open in browser: http://localhost:8088
+# Login with admin/admin
+
+
+# STEP 3: Check DAG is Loaded
+# -------------------------------------------
+# In Airflow UI, you should see:
+# DAG Name: amazon_dual_pipeline_orchestration
+# Tags: amazon, oltp, olap, spark, hdfs, trino
+
+# Via command line:
+docker exec -it airflow-webserver airflow dags list | findstr amazon
+
+
+# STEP 4: Trigger the DAG
+# -------------------------------------------
+# Option A - Via Web UI (RECOMMENDED):
+# 1. Go to http://localhost:8088
+# 2. Find "amazon_dual_pipeline_orchestration"
+# 3. Toggle the switch to enable it (left side)
+# 4. Click the "Play" button (▶) on the right
+# 5. Click "Trigger DAG"
+
+# Option B - Via Command Line:
+docker exec -it airflow-webserver airflow dags trigger amazon_dual_pipeline_orchestration
+
+
+# STEP 5: Monitor DAG Execution
+# -------------------------------------------
+# In Airflow UI:
+# - Click on the DAG name
+# - Click on "Graph" view to see task flow
+# - Green = Success, Red = Failed, Yellow = Running
+
+# Check scheduler logs:
+docker logs -f airflow-scheduler
+
+# Check specific task logs in the UI by clicking on task boxes
+
+
+# ========================================
+# VERIFY EACH PIPELINE STAGE
+# ========================================
+
+# STAGE 1: Check Kafka Topic (Producer ran)
+# -------------------------------------------
+docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic amazon-sales --from-beginning --max-messages 10
+
+# Expected: Should see JSON records from Amazon.csv
+
+
+# STAGE 2: Check Postgres (OLTP Pipeline - Streaming)
+# -------------------------------------------
+docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT COUNT(*) FROM orders_live;"
+
+# Expected: Should show count > 0 (e.g., thousands of records)
+
+docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT * FROM orders_live LIMIT 5;"
+
+# Expected: Should show sample orders with columns:
+# order_id, product_name, category, price, quantity, order_date, customer_id, etc.
+
+
+# STAGE 3: Check HDFS Bronze Layer (OLAP - CSV)
+# -------------------------------------------
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/bronze/amazon_sales_csv"
+
+# Expected: Should show CSV files written by Spark
+
+
+# STAGE 4: Check HDFS Silver Layer (OLAP - Cleaned Parquet)
+# -------------------------------------------
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/silver/amazon_sales"
+
+# Expected: Should show Parquet files
+
+
+# STAGE 5: Check HDFS Gold Layer (OLAP - Aggregated Parquet)
+# -------------------------------------------
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_gold"
+
+# Expected: Should show Parquet files with aggregated data
+
+
+# STAGE 6: Check Complete HDFS Structure
+# -------------------------------------------
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls -R /datalake"
+
+# Expected: Tree structure showing bronze/silver/gold with files
+
+
+# ========================================
+# VERIFY VISUALIZATION LAYERS
+# ========================================
+
+# STREAMLIT Dashboard (OLTP - Real-time)
+# -------------------------------------------
+echo Opening Streamlit at http://localhost:8502
+
+# Open in browser: http://localhost:8502
+# You should see live KPIs and charts from Postgres orders_live table
+
+
+# TRINO Query Engine (OLAP - Analytics)
+# -------------------------------------------
+echo Opening Trino at http://localhost:8090
+
+# Open in browser: http://localhost:8090
+# Query Gold tables:
+
+# Sample Trino query (run in Trino UI):
+# SELECT day, category, totalrevenue 
+# FROM hive.datalake.gold_amazon_sales_daily 
+# ORDER BY day DESC 
+# LIMIT 20;
+
+
+# ========================================
+# TROUBLESHOOTING
+# ========================================
+
+# If DAG fails, check task logs:
+# -------------------------------------------
+# In Airflow UI: Click task box -> View Log
+
+# Common issues and fixes:
+
+# 1. Docker network mismatch:
+docker network ls | findstr talan
+
+# Expected network: talan-bootcamp-final-stage_netw
+
+
+# 2. Check all core services are up:
+docker ps --format "table {{.Names}}\t{{.Status}}" | findstr -v "Exited"
+
+
+# 3. Check Spark Master is reachable:
+docker logs spark-master | findstr -i "started"
+
+
+# 4. Check Kafka is accepting messages:
+docker logs kafka | findstr -i "started"
+
+
+# 5. Check HDFS is healthy:
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfsadmin -report"
+
+
+# 6. Restart Airflow if needed:
+docker compose restart airflow-webserver airflow-scheduler
+
+
+# ========================================
+# QUICK SUCCESS CHECK
+# ========================================
+
+# Run all verification commands at once:
+echo "=== Checking Postgres OLTP ==="
+docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT COUNT(*) FROM orders_live;"
+
+echo ""
+echo "=== Checking HDFS Bronze ==="
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/bronze/amazon_sales_csv | tail -3"
+
+echo ""
+echo "=== Checking HDFS Silver ==="
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/silver/amazon_sales | tail -3"
+
+echo ""
+echo "=== Checking HDFS Gold ==="
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_gold | tail -3"
+
+echo ""
+echo "=== All layers verified! ==="
+
+
+# ========================================
+# EXPECTED WORKFLOW TIMELINE
+# ========================================
+
+# When you trigger the DAG:
+#
+# 1. [0-10s] truncate_orders_live - Clears Postgres table
+# 2. [10s-2min] produce_csv_to_kafka - Sends CSV to Kafka
+# 3. [10s-1min] spark_oltp_streaming_to_postgres - Streams to Postgres (parallel with producer)
+# 4. [2-3min] kafka_to_bronze_csv - Reads all Kafka messages to HDFS Bronze
+# 5. [3-4min] bronze_to_silver - Transforms CSV to Parquet (Silver layer)
+# 6. [4-5min] silver_to_gold - Aggregates data (Gold layer)
+#
+# Total time: ~5-7 minutes for full pipeline
