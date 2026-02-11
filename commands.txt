@@ -2,146 +2,208 @@
 # Amazon Sales Lakehouse Project
 # Complete Launch Commands
 # ========================================
+#
+# Architecture:
+#   OLTP: Amazon.csv -> Kafka -> Spark Streaming (real-time) -> Postgres -> Streamlit
+#   OLAP: Amazon.csv -> HDFS Bronze (CSV) -> Silver (Parquet) -> Gold (Parquet) -> Hive/Trino
+#
+# Key Feature: Producer and Spark Streaming run IN PARALLEL.
+#   Streamlit dashboard auto-refreshes every 5s to show metrics increasing live.
+#
+# ========================================
 
+
+# ========================================
 # STEP 1: Clean Environment
+# ========================================
 # Remove all containers, volumes, and orphaned containers
 docker compose down -v --remove-orphans
 
+
+# ========================================
 # STEP 2: Build Custom Images
-# Build spark-jobs image (Spark batch + streaming jobs)
+# ========================================
+# Build spark-jobs image (contains all 4 Spark scripts + Amazon.csv)
 docker compose --profile build build
-# Build producer image (Kafka CSV producer)
+
+# Build producer image (Kafka CSV producer with progressive sending)
 docker compose --profile manual build
 
+
+# ========================================
 # STEP 3: Start All Services
-# Launch the entire stack (Kafka, HDFS, Spark, Hive, Trino, Postgres, Airflow, Streamlit)
+# ========================================
+# Launch the entire stack:
+#   Zookeeper, Kafka, HDFS (namenode + datanode), Hive (metastore + server),
+#   Spark (master + worker), Trino, Postgres, Airflow (webserver + scheduler), Streamlit
 docker compose up -d
 
-# STEP 4: Check Container Status
-# Verify all containers are running
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
-# Wait ~90 seconds for all services to initialize, especially:
-# - HDFS namenode/datanode + hdfs-init (directory creation)
-# - hive-metastore-init (schematool schema creation)
-# - Hive metastore + hive-server (table creation)
-# - Airflow database initialization
+# ========================================
+# STEP 4: Wait ~90 seconds for initialization
+# ========================================
+# The following init containers run and exit automatically:
+#   - hdfs-init: creates /datalake/bronze, /silver, /gold, /checkpoints directories
+#   - hive-metastore-init: runs schematool to create Hive metastore schema
+#   - hive-server: creates Bronze/Silver/Gold external tables in Hive
+#   - airflow-webserver: runs `airflow db init` + creates admin user
+#
+# Check status:
+docker ps --format "table {{.Names}}\t{{.Status}}"
 
-# STEP 5: Restart Airflow Scheduler (if needed)
-# The scheduler may exit if it starts before the webserver finishes `airflow db init`.
-# Check with: docker ps -a | findstr airflow-scheduler
-# If it shows "Exited", restart it:
+
+# ========================================
+# STEP 5: Restart Airflow Scheduler
+# ========================================
+# The scheduler starts before the webserver finishes `airflow db init`,
+# so it exits with code 1. This is expected — just restart it:
 docker start airflow-scheduler
 
-# ========================================
-# Access Web Interfaces
-# ========================================
+# Verify it is running:
+docker ps --format "table {{.Names}}\t{{.Status}}" | findstr airflow-scheduler
+# Expected: airflow-scheduler   Up X seconds
 
-# Airflow UI (Orchestration)
-# URL: http://localhost:8088
-# Credentials: admin/admin
-# Trigger DAG: amazon_dual_pipeline_orchestration
-
-# Streamlit Dashboard (OLTP - Aggregated Sales KPIs)
-# URL: http://localhost:8502
-# Shows aggregated KPIs from Postgres (daily revenue, categories, countries)
-
-# Trino Query Engine (OLAP - Analytics)
-# URL: http://localhost:8090
-# Query Bronze/Silver/Gold tables from the Lakehouse
-
-# Spark Master UI
-# URL: http://localhost:8080
-# Monitor Spark jobs
-
-# HDFS Namenode UI
-# URL: http://localhost:9870
-# Browse HDFS filesystem
 
 # ========================================
-# Verification Commands
+# STEP 6: Open Web Interfaces
+# ========================================
+# Open these URLs in your browser:
+#
+#   Streamlit Dashboard (OLTP real-time KPIs)
+#   URL: http://localhost:8502
+#   -> Open this BEFORE triggering the DAG to watch metrics increase live
+#
+#   Airflow UI (Orchestration)
+#   URL: http://localhost:8088
+#   Credentials: admin / admin
+#
+#   Spark Master UI
+#   URL: http://localhost:8080
+#
+#   HDFS Namenode UI
+#   URL: http://localhost:9870
+#
+#   Trino Query Engine (OLAP analytics)
+#   URL: http://localhost:8090
+
+
+# ========================================
+# STEP 7: Trigger the Airflow DAG
+# ========================================
+# 1. Go to http://localhost:8088
+# 2. Find DAG: amazon_dual_pipeline_orchestration
+# 3. Toggle the switch ON (left side) to enable it
+# 4. Click the Play button (right side) -> "Trigger DAG"
+# 5. Watch execution in Graph view (Green=Success, Yellow=Running, Red=Failed)
+#
+# DAG Task Flow (real-time parallel OLTP):
+#
+#   start
+#   |
+#   |-- oltp_pipeline (PARALLEL):
+#   |   |-- produce_csv_to_kafka   (sends 100K rows progressively ~2 min)
+#   |   |-- spark_oltp_streaming   (reads Kafka -> aggregates -> Postgres every 10s)
+#   |   `-- [both finish] >> restart_streamlit_dashboard
+#   |
+#   `-- olap_pipeline (SEQUENTIAL):
+#       |-- csv_to_bronze_hdfs     (CSV -> HDFS Bronze)
+#       |-- bronze_to_silver       (Bronze -> Silver Parquet, partitioned by year/month)
+#       `-- silver_to_gold         (Silver -> Gold Parquet, daily aggregated KPIs)
+#   |
+#   end
+#
+# While the DAG runs, watch Streamlit (http://localhost:8502):
+#   -> Total Orders, Total Revenue, etc. increase in real-time every 5 seconds!
+
+
+# ========================================
+# Verification Commands (after DAG completes)
 # ========================================
 
-# Kafka: Check messages in topic
+# --- OLTP Pipeline ---
+
+# Kafka: Check messages were produced
 docker exec -it kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic amazon-sales --from-beginning --max-messages 5
 
-# HDFS: Check Bronze layer (CSV loaded directly from Amazon.csv)
-docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/bronze/amazon_sales_csv | tail"
-
-# HDFS: Check Silver layer (Parquet - cleaned/enriched data)
-docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/silver/amazon_sales | tail"
-
-# HDFS: Check Gold layer (Parquet - aggregated KPIs)
-docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_gold | tail"
-
-# Postgres: Check aggregated sales count
+# Postgres: Count aggregated rows
 docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT count(*) FROM orders_live;"
 
-# Postgres: View sample aggregated data
+# Postgres: Sample aggregated data
 docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT day, category, country, totalorders, totalrevenue FROM orders_live LIMIT 10;"
 
 # Postgres: Distinct dimensions
 docker exec -it postgres-mart psql -U mart -d martdb -c "SELECT count(DISTINCT day) AS days, count(DISTINCT category) AS categories, count(DISTINCT country) AS countries FROM orders_live;"
 
-# Hive: List tables in metastore
+# --- OLAP Pipeline ---
+
+# HDFS: Check Bronze layer (CSV)
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/bronze/amazon_sales_csv | tail"
+
+# HDFS: Check Silver layer (Parquet, partitioned)
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/silver/amazon_sales | tail"
+
+# HDFS: Check Gold layer (Parquet, aggregated)
+docker exec -it namenode bash -lc "/opt/hadoop-3.1.3/bin/hdfs dfs -ls /datalake/gold/amazon_sales_gold | tail"
+
+# Hive: List tables
 docker exec -it hive-server bash -lc "/opt/hive/bin/beeline -u jdbc:hive2://localhost:10000 -n hive -e 'SHOW TABLES IN datalake;'"
 
 # Trino: Query Gold layer
 docker exec trino trino --execute "SELECT count(*) FROM hive.datalake.gold_amazon_sales_daily"
 docker exec trino trino --execute "SELECT * FROM hive.datalake.gold_amazon_sales_daily LIMIT 5"
 
-# ========================================
-# Airflow DAG Execution
-# ========================================
-
-# After logging into Airflow (http://localhost:8088):
-# 1. Enable the DAG: amazon_dual_pipeline_orchestration
-# 2. Trigger the DAG manually
-# 3. Monitor task execution (typical full run ~2 minutes)
-# 4. Check task logs for any failures
-
-# DAG Task Flow:
-#   start
-#   |-- produce_csv_to_kafka  (CSV -> Kafka ~22s)
-#   |   `-- spark_oltp_streaming  (Kafka -> aggregate -> Postgres ~80s)
-#   `-- csv_to_bronze_hdfs  (CSV -> HDFS Bronze ~11s)
-#       `-- bronze_to_silver  (Bronze -> Silver Parquet ~26s)
-#           `-- silver_to_gold  (Silver -> Gold Parquet ~80s)
-#   [spark_oltp_streaming, silver_to_gold] >> end
 
 # ========================================
-# Trino Sample Queries
+# Trino Sample Queries (OLAP Analytics)
 # ========================================
 
 # Top revenue categories:
-# SELECT category, SUM(totalrevenue) AS revenue
-# FROM hive.datalake.gold_amazon_sales_daily
-# GROUP BY category ORDER BY revenue DESC;
+# docker exec trino trino --execute \
+#   "SELECT category, SUM(totalrevenue) AS revenue
+#    FROM hive.datalake.gold_amazon_sales_daily
+#    GROUP BY category ORDER BY revenue DESC"
 
 # Daily revenue trend:
-# SELECT day, SUM(totalrevenue) AS revenue
-# FROM hive.datalake.gold_amazon_sales_daily
-# GROUP BY day ORDER BY day;
+# docker exec trino trino --execute \
+#   "SELECT day, SUM(totalrevenue) AS revenue
+#    FROM hive.datalake.gold_amazon_sales_daily
+#    GROUP BY day ORDER BY day"
+
+# Revenue by country:
+# docker exec trino trino --execute \
+#   "SELECT country, SUM(totalrevenue) AS revenue
+#    FROM hive.datalake.gold_amazon_sales_daily
+#    GROUP BY country ORDER BY revenue DESC"
+
 
 # ========================================
-# Troubleshooting Commands
+# Troubleshooting
 # ========================================
 
-# View logs for specific service
+# Check logs for a specific service:
 docker logs -f airflow-webserver
 docker logs -f airflow-scheduler
-docker logs hive-metastore
 docker logs hive-metastore-init
+docker logs hive-server
+docker logs hdfs-init
 
-# Check network connectivity
+# Check network connectivity:
 docker network inspect talan-bootcamp-final-stage_netw
 
+# Force restart a service:
+docker restart airflow-scheduler
+docker restart streamlit-oltp
+
+# If Airflow DockerOperator fails, check Docker socket is mounted:
+docker exec airflow-webserver ls -la /var/run/docker.sock
+
+
 # ========================================
-# Shutdown Commands
+# Shutdown
 # ========================================
 
-# Stop all services (keep volumes)
+# Stop all services (keep data volumes for next time)
 docker compose stop
 
-# Stop and remove everything including volumes
-docker compose down -v
+# Stop and remove everything including all data
+docker compose down -v --remove-orphans

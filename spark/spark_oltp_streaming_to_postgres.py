@@ -17,7 +17,7 @@ from pyspark.sql.types import (
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "amazon-sales")
-KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "latest")
+KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "earliest")
 
 PG_URL = os.getenv("PG_URL", "jdbc:postgresql://postgres-mart:5432/martdb")
 PG_USER = os.getenv("PG_USER", "mart")

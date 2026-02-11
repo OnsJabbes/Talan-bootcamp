@@ -5,8 +5,8 @@ from kafka.errors import KafkaError
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 KAFKA_TOPIC  = os.getenv("KAFKA_TOPIC", "amazon-sales")
 CSV_FILE     = os.getenv("CSV_FILE", "/data/Amazon.csv")
-RATE         = int(os.getenv("RATE", "0"))
-DELAY        = 60.0 / RATE if RATE > 0 else 5
+RATE         = int(os.getenv("RATE", "1000"))
+DELAY        = (60.0 / RATE) if RATE > 0 else 0
 
 def create_producer():
     for i in range(15):
@@ -68,7 +68,8 @@ def main():
                 }
                 producer.send(KAFKA_TOPIC, value=msg)
                 sent += 1
-                if sent % 10000 == 0:
+                if sent % 5000 == 0:
+                    producer.flush()
                     print("sent %d" % sent)
                 if DELAY > 0:
                     time.sleep(DELAY)

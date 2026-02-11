@@ -33,7 +33,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Filters")
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_filter_values():
     q = text("""
         SELECT
@@ -131,7 +131,7 @@ def load_kpis(where_sql, params):
     return pd.read_sql(q, engine, params=params)
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def load_daily_trend(where_sql, params):
     q = text(f"""
         SELECT
@@ -147,7 +147,7 @@ def load_daily_trend(where_sql, params):
     return pd.read_sql(q, engine, params=params)
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def load_by_dimension(where_sql, params, dim, metric="totalrevenue", topn=15):
     q = text(f"""
         SELECT {dim} AS k, SUM({metric})::float8 AS v
@@ -160,7 +160,7 @@ def load_by_dimension(where_sql, params, dim, metric="totalrevenue", topn=15):
     return pd.read_sql(q, engine, params=params)
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def load_raw_agg(where_sql, params, limit=500):
     q = text(f"""
         SELECT *
