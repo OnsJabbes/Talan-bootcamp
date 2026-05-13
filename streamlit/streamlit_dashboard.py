@@ -1,6 +1,5 @@
 import os
 import time
-import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -13,7 +12,7 @@ PG_HOST = os.getenv("PG_HOST", "postgres-mart")
 PG_PORT = os.getenv("PG_PORT", "5432")
 PG_DB   = os.getenv("PG_DB", "martdb")
 PG_USER = os.getenv("PG_USER", "mart")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "mart")
+PG_PASSWORD = os.environ["PG_PASSWORD"]
 
 engine = create_engine(
     f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}",
@@ -118,14 +117,15 @@ def build_where():
 
 @st.cache_data(ttl=5)
 def load_latest_orders(n, where_sql, params):
+    n = int(n)
     q = text(f"""
         SELECT *
         FROM orders_live
         {where_sql}
         ORDER BY processing_timestamp DESC NULLS LAST
-        LIMIT {n}
+        LIMIT :_limit
     """)
-    return pd.read_sql(q, engine, params=params)
+    return pd.read_sql(q, engine, params={**params, "_limit": n})
 
 @st.cache_data(ttl=10)
 def load_kpis(where_sql, params):
@@ -154,8 +154,12 @@ def load_timeseries(where_sql, params):
     """)
     return pd.read_sql(q, engine, params=params)
 
+ALLOWED_GROUP_COLS = {"category", "country", "paymentmethod", "orderstatus"}
+
 @st.cache_data(ttl=20)
 def load_group_counts(where_sql, params, colname, metric="count"):
+    if colname not in ALLOWED_GROUP_COLS:
+        raise ValueError(f"Invalid column: {colname}")
     if metric == "count":
         q = text(f"""
           SELECT {colname} AS k, COUNT(*)::bigint AS v
